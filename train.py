@@ -4,13 +4,15 @@ import torchvision.transforms as transforms
 import torch.optim as optim
 import os
 
+_DATASET = torchvision.datasets.CIFAR10
+
 
 def test_model(rank: int, model: torch.nn.Module, batch_size: int) -> float:
     transform = transforms.Compose(
         [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
     )
 
-    testset = torchvision.datasets.CIFAR10(
+    testset = _DATASET(
         root="./data", train=False, download=rank == 0, transform=transform
     )
     testloader = torch.utils.data.DataLoader(
@@ -77,17 +79,19 @@ def train_model(
         [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
     )
 
-    trainset = torchvision.datasets.CIFAR10(
+    trainset = _DATASET(
         root="./data", train=True, download=rank == 0, transform=transform
     )
     trainloader = torch.utils.data.DataLoader(
-        trainset, batch_size=batch_size, shuffle=True, num_workers=2
+        trainset, batch_size=batch_size, shuffle=True
     )
 
     print(f"{rank} - Dataset ready")
 
     # Setup a model
-    model = torchvision.models.resnet18(pretrained=False, progress=False)
+    model = torchvision.models.resnet18(
+        pretrained=False, progress=False, num_classes=len(trainset.targets)
+    )
     print(f"{rank} - Model ready")
 
     # Start the training
@@ -96,7 +100,7 @@ def train_model(
 
     for epoch in range(epochs):
         running_loss = 0.0
-        for i, data in enumerate(trainloader, 0):
+        for i, data in enumerate(trainloader, 1):
             # get the inputs; data is a list of [inputs, labels]
             inputs, labels = data
 
@@ -111,14 +115,15 @@ def train_model(
 
             # print statistics
             running_loss += loss.item()
-            if i % 200 == 199:  # print every 200 mini-batches
+
+            if i % 200 == 0:  # print every 200 mini-batches
                 print(
                     rank,
                     "[%d, %5d] loss: %.3f" % (epoch + 1, i + 1, running_loss / 2000),
                 )
                 running_loss = 0.0
 
-            if (i + 1) % sync_interval == 0:
+            if i % sync_interval == 0:
                 mix_lottery_tickets(rank, world_size, model)
 
         print(rank, " Finished Training")

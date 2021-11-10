@@ -3,6 +3,7 @@ import os
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from train import train_model
+import os
 
 
 def run(rank, size):
