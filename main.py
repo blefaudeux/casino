@@ -7,8 +7,7 @@ from train import train_model
 
 def run(rank, size):
     """Distributed function to be implemented later."""
-    print(f"{rank}/{size} - setting up")
-    train_model(rank, size, epochs=1, batch_size=16)
+    train_model(rank, size, epochs=1, batch_size=16, sync_interval=1000)
 
 
 def init_process(rank, size, fn, backend="gloo"):

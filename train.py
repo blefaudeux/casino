@@ -2,13 +2,14 @@ import torch
 import torchvision
 import torchvision.transforms as transforms
 import torch.optim as optim
-from typing import Any
 import os
 
 
-def test_model(
-    rank: int, model: torch.nn.Module, transform: Any, batch_size: int
-) -> float:
+def test_model(rank: int, model: torch.nn.Module, batch_size: int) -> float:
+    transform = transforms.Compose(
+        [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
+    )
+
     testset = torchvision.datasets.CIFAR10(
         root="./data", train=False, download=rank == 0, transform=transform
     )
@@ -35,7 +36,31 @@ def test_model(
     return accuracy
 
 
-def train_model(rank: int, size: int, epochs: int, batch_size: int):
+def mix_lottery_tickets(rank: int, size: int, model: torch.nn.Module):
+    with torch.no_grad():
+        # Test the models across all ranks, EMA with the best one
+        print(rank, "Evaluating the model")
+        acc = torch.tensor(test_model(rank, model, batch_size=16))
+
+        # Fetch all the results
+        acc_list = [acc.clone() for _ in range(size)]
+        torch.distributed.all_gather(acc_list, acc)
+
+        scores = torch.tensor([t.item() for t in acc_list])
+        winner = torch.argmax(scores).item()
+
+        print(rank, f"Rank {winner} is the winner. Syncing")
+
+        # Pull the winner model in and continue
+        for p in model.parameters():
+            torch.distributed.broadcast(p.data, src=winner)
+
+        print(rank, "Sync done\n")
+
+
+def train_model(
+    rank: int, world_size: int, epochs: int, batch_size: int, sync_interval: int
+):
     """
     Train a model on a single rank
     """
@@ -43,7 +68,7 @@ def train_model(rank: int, size: int, epochs: int, batch_size: int):
 
     # Initial setup to handle some distribution
     torch.random.manual_seed(rank)
-    cpu_per_process = max(os.cpu_count() // size, 1)
+    cpu_per_process = max(os.cpu_count() // world_size, 1)  # type: ignore
     print(rank, f"Using {cpu_per_process} cpus per process")
     torch.set_num_threads(cpu_per_process)
 
@@ -93,7 +118,10 @@ def train_model(rank: int, size: int, epochs: int, batch_size: int):
                 )
                 running_loss = 0.0
 
+            if (i + 1) % sync_interval == 0:
+                mix_lottery_tickets(rank, world_size, model)
+
         print(rank, " Finished Training")
 
     # Test the model now
-    test_model(rank, model, transform, batch_size)
+    test_model(rank, model, batch_size)
