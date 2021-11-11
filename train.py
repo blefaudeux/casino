@@ -4,12 +4,12 @@ import torchvision.transforms as transforms
 import torch.optim as optim
 import os
 
-_DATASET = torchvision.datasets.CIFAR10
+_DATASET = torchvision.datasets.MNIST  #  torchvision.datasets.CIFAR10
 
 
 def test_model(rank: int, model: torch.nn.Module, batch_size: int) -> float:
     transform = transforms.Compose(
-        [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
+        [transforms.ToTensor(), transforms.Normalize((0.5), (0.5))]
     )
 
     testset = _DATASET(
@@ -70,20 +70,20 @@ def train_model(
 
     # Initial setup to handle some distribution
     torch.random.manual_seed(rank)
-    cpu_per_process = max(os.cpu_count() // world_size, 1)  # type: ignore
+    cpu_per_process = max(os.cpu_count() // (2 * world_size), 1)  # type: ignore
     print(rank, f"Using {cpu_per_process} cpus per process")
     torch.set_num_threads(cpu_per_process)
 
     # Setup the transforms and the dataset
     transform = transforms.Compose(
-        [transforms.ToTensor(), transforms.Normalize((0.5, 0.5, 0.5), (0.5, 0.5, 0.5))]
+        [transforms.ToTensor(), transforms.Normalize((0.5), (0.5))]
     )
 
     trainset = _DATASET(
         root="./data", train=True, download=rank == 0, transform=transform
     )
     trainloader = torch.utils.data.DataLoader(
-        trainset, batch_size=batch_size, shuffle=True
+        trainset, batch_size=batch_size, shuffle=True, workers=2
     )
 
     print(f"{rank} - Dataset ready")
@@ -91,6 +91,11 @@ def train_model(
     # Setup a model
     model = torchvision.models.resnet18(
         pretrained=False, progress=False, num_classes=len(trainset.targets)
+    )
+
+    # Adjust the model for the MNIST dataset
+    model.conv1 = torch.nn.Conv2d(
+        1, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False
     )
     print(f"{rank} - Model ready")
 
