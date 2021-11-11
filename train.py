@@ -3,8 +3,9 @@ import torchvision
 import torchvision.transforms as transforms
 import torch.optim as optim
 import os
+from enum import Enum, auto
 
-_DATASET = torchvision.datasets.MNIST  #  torchvision.datasets.CIFAR10
+_DATASET = torchvision.datasets.MNIST  # torchvision.datasets.CIFAR10
 
 
 def test_model(rank: int, model: torch.nn.Module, batch_size: int) -> float:
@@ -38,7 +39,11 @@ def test_model(rank: int, model: torch.nn.Module, batch_size: int) -> float:
     return accuracy
 
 
-def mix_lottery_tickets(rank: int, size: int, model: torch.nn.Module):
+def spread_lottery_tickets(rank: int, size: int, model: torch.nn.Module):
+    """
+    One naive method: check how all the agents are doing,
+    pick the weights from the best one
+    """
     with torch.no_grad():
         # Test the models across all ranks, EMA with the best one
         print(rank, "Evaluating the model")
@@ -60,8 +65,61 @@ def mix_lottery_tickets(rank: int, size: int, model: torch.nn.Module):
         print(rank, "Sync done\n")
 
 
+def freeze_pruned_weights(model: torch.nn.Module, epsilon: float):
+    """
+    Nuke the gradients for all the weights which are small enough.
+    Ideally we could fork the optimizer and make it pruning aware
+    but this is the poor man's take
+    """
+    with torch.no_grad():
+        for name, p in model.named_parameters():
+            if "weight" in name:
+                tensor = p.data
+                grad_tensor = p.grad
+                grad_tensor = torch.where(
+                    tensor.abs() < epsilon, torch.zeros_like(grad_tensor), grad_tensor
+                )
+                p.grad.data = grad_tensor
+
+
+def exchange_lottery_tickets(rank: int, model: torch.nn.Module, epsilon: float):
+    """
+    Each agent prunes its weights, and exchanges the pruned coordinates with the others
+    """
+
+    with torch.no_grad():
+        for p in model.parameters():
+            # Find the local weights which should be pruned
+            local_prune = p.data < epsilon
+
+            # Share that with everyone. all_reduce requires ints somehow
+            shared_prune = local_prune.to(torch.int32)
+            torch.distributed.all_reduce(
+                shared_prune, op=torch.distributed.ReduceOp.BOR
+            )
+            shared_prune = shared_prune.to(torch.bool)
+
+            print(
+                rank,
+                f"{torch.sum(local_prune)} pruned locally, {torch.sum(shared_prune)} pruned collectively",
+            )
+
+            # Prune following the collective knowledge
+            p.data = torch.where(shared_prune, p.data, torch.zeros_like(p.data))
+
+
+class Strategy(Enum):
+    PRUNE = auto()
+    SPREAD = auto()
+
+
 def train_model(
-    rank: int, world_size: int, epochs: int, batch_size: int, sync_interval: int
+    rank: int,
+    world_size: int,
+    epochs: int,
+    batch_size: int,
+    sync_interval: int,
+    strategy: Strategy,
 ):
     """
     Train a model on a single rank
@@ -69,7 +127,7 @@ def train_model(
     # TODO: parameters to pick the model, optimizer, etc..
 
     # Initial setup to handle some distribution
-    torch.random.manual_seed(rank)
+    torch.random.manual_seed(42)
     cpu_per_process = max(os.cpu_count() // (2 * world_size), 1)  # type: ignore
     print(rank, f"Using {cpu_per_process} cpus per process")
     torch.set_num_threads(cpu_per_process)
@@ -98,6 +156,7 @@ def train_model(
         1, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False
     )
     print(f"{rank} - Model ready")
+    torch.random.manual_seed(rank)
 
     # Start the training
     criterion = torch.nn.CrossEntropyLoss()
@@ -105,6 +164,7 @@ def train_model(
 
     for epoch in range(epochs):
         running_loss = 0.0
+
         for i, data in enumerate(trainloader, 1):
             # get the inputs; data is a list of [inputs, labels]
             inputs, labels = data
@@ -116,6 +176,10 @@ def train_model(
             outputs = model(inputs)
             loss = criterion(outputs, labels)
             loss.backward()
+
+            if strategy == Strategy.PRUNE:
+                freeze_pruned_weights(model, epsilon=1e-4)
+
             optimizer.step()
 
             # print statistics
@@ -129,7 +193,12 @@ def train_model(
                 running_loss = 0.0
 
             if i % sync_interval == 0:
-                mix_lottery_tickets(rank, world_size, model)
+                if strategy == Strategy.SPREAD:
+                    spread_lottery_tickets(rank, world_size, model)
+
+                elif strategy == Strategy.PRUNE:
+                    exchange_lottery_tickets(rank, model, epsilon=1e-4)
+                    # FIXME: We should reset the non-pruned weights here I believe
 
         print(rank, " Finished Training")
 

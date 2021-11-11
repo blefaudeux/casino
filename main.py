@@ -2,13 +2,14 @@
 import os
 import torch.distributed as dist
 import torch.multiprocessing as mp
-from train import train_model
-import os
+from train import train_model, Strategy
 
 
 def run(rank, size):
     """Distributed function to be implemented later."""
-    train_model(rank, size, epochs=1, batch_size=16, sync_interval=100)
+    train_model(
+        rank, size, epochs=1, batch_size=16, sync_interval=100, strategy=Strategy.PRUNE
+    )
 
 
 def init_process(rank, size, fn, backend="gloo"):
@@ -20,7 +21,7 @@ def init_process(rank, size, fn, backend="gloo"):
 
 
 if __name__ == "__main__":
-    size = 4
+    size = os.cpu_count() // 2
     processes = []
     mp.set_start_method("spawn")
     for rank in range(size):
