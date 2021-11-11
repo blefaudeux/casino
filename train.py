@@ -83,7 +83,7 @@ def train_model(
         root="./data", train=True, download=rank == 0, transform=transform
     )
     trainloader = torch.utils.data.DataLoader(
-        trainset, batch_size=batch_size, shuffle=True, workers=2
+        trainset, batch_size=batch_size, shuffle=True, num_workers=2
     )
 
     print(f"{rank} - Dataset ready")
@@ -121,7 +121,7 @@ def train_model(
             # print statistics
             running_loss += loss.item()
 
-            if i % 200 == 0:  # print every 200 mini-batches
+            if i % 20 == 0:  # print every 200 mini-batches
                 print(
                     rank,
                     "[%d, %5d] loss: %.3f" % (epoch + 1, i + 1, running_loss / 2000),

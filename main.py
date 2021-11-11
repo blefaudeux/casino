@@ -8,7 +8,7 @@ import os
 
 def run(rank, size):
     """Distributed function to be implemented later."""
-    train_model(rank, size, epochs=1, batch_size=16, sync_interval=1000)
+    train_model(rank, size, epochs=1, batch_size=16, sync_interval=100)
 
 
 def init_process(rank, size, fn, backend="gloo"):
@@ -20,7 +20,7 @@ def init_process(rank, size, fn, backend="gloo"):
 
 
 if __name__ == "__main__":
-    size = 2
+    size = 4
     processes = []
     mp.set_start_method("spawn")
     for rank in range(size):
