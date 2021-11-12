@@ -21,7 +21,7 @@ def init_process(rank, size, fn, backend="gloo"):
 
 
 if __name__ == "__main__":
-    size = os.cpu_count() // 3
+    size = os.cpu_count() // 3  # type: ignore
     processes = []
     mp.set_start_method("spawn")
     for rank in range(size):

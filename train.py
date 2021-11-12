@@ -82,7 +82,11 @@ def freeze_pruned_weights(model: torch.nn.Module, epsilon: float):
 
 
 def exchange_lottery_tickets(
-    rank: int, model: torch.nn.Module, epsilon: float, max_pruning_per_layer
+    rank: int,
+    model: torch.nn.Module,
+    epsilon: float,
+    max_pruning_per_layer: float,
+    vote_threshold: int,
 ):
     """
     Each agent prunes its weights, and exchanges the pruned coordinates with the others
@@ -92,33 +96,33 @@ def exchange_lottery_tickets(
         overall_pruned = 0
         overall_parameters = 0
 
-        for p in model.parameters():
-            # Find the local weights which should be pruned
-            local_prune = p.data < epsilon
+        for name, p in model.named_parameters():
+            if "weight" in name:
+                # Find the local weights which should be pruned
+                local_prune = p.data < epsilon
 
-            # Share that with everyone. all_reduce requires ints somehow
-            shared_prune = local_prune.to(torch.int32)
+                # Share that with everyone. all_reduce requires ints
+                shared_prune = local_prune.to(torch.int32)
 
-            # TOOD: test different strategies here,
-            # could be that we require a AND
-            # or that there's a floor on the agreement in between agents
-            torch.distributed.all_reduce(
-                shared_prune, op=torch.distributed.ReduceOp.BAND
-            )
-            shared_prune = shared_prune.to(torch.bool)
+                torch.distributed.all_reduce(
+                    shared_prune, op=torch.distributed.ReduceOp.SUM
+                )
 
-            print(
-                rank,
-                f"{torch.sum(local_prune)} pruned locally, {torch.sum(shared_prune)} pruned collectively",
-            )
+                # Only keep the pruning which is suggested by enough agents
+                shared_prune = shared_prune > vote_threshold
 
-            if torch.sum(shared_prune) / p.numel() < max_pruning_per_layer:
+                print(
+                    rank,
+                    f"{torch.sum(local_prune)} pruned locally, {torch.sum(shared_prune)} pruned collectively",
+                )
+
                 # Prune following the collective knowledge
-                p.data = torch.where(shared_prune, p.data, torch.zeros_like(p.data))
+                if torch.sum(shared_prune) / p.numel() < max_pruning_per_layer:
+                    p.data = torch.where(shared_prune, p.data, torch.zeros_like(p.data))
 
-                # Bookkeeping:
-                overall_pruned += torch.sum(shared_prune)
-                overall_parameters += p.numel()
+                    # Bookkeeping:
+                    overall_pruned += torch.sum(shared_prune)
+                    overall_parameters += p.numel()
 
     pruning_ratio = overall_pruned / overall_parameters
 
@@ -220,7 +224,7 @@ def train_model(
 
                 elif strategy == Strategy.PRUNE and keep_pruning:
                     pruning_ratio = exchange_lottery_tickets(
-                        rank, model, epsilon=1e-4, max_pruning_per_layer=0.5
+                        rank, model, epsilon=1e-4, max_pruning_per_layer=0.5, vote_threshold=2
                     )
                     # FIXME: We should reset the non-pruned weights here I believe
 
