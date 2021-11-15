@@ -42,11 +42,12 @@ def exchange_lottery_tickets(
     vote_threshold: int,
 ):
     """
-    Each agent prunes its weights, and exchanges the pruned coordinates with the others
+    Each agent prunes its weights, and exchanges the pruned coordinates with the others.
+
     """
 
     with torch.no_grad():
-        overall_pruned = 0
+        overall_pruned = 0.0
         overall_parameters = 0
 
         for name, p in model.named_parameters():
@@ -74,7 +75,7 @@ def exchange_lottery_tickets(
                     p.data = torch.where(shared_prune, torch.zeros_like(p.data), p.data)
 
                     # Bookkeeping:
-                    overall_pruned += torch.sum(shared_prune)
+                    overall_pruned += torch.sum(shared_prune).item()
                     overall_parameters += p.numel()
 
     pruning_ratio = overall_pruned / overall_parameters
@@ -83,3 +84,32 @@ def exchange_lottery_tickets(
         print(f"Model is now {pruning_ratio:.2f} pruned")
 
     return pruning_ratio
+
+
+def exchange_lottery_tickets_sorted(
+    rank: int,
+    model: torch.nn.Module,
+    desired_pruning_ratio: float,
+):
+    """
+    Each agent prunes its weights, and exchanges the pruned coordinates with the others.
+
+    """
+
+    with torch.no_grad():
+        for name, p in model.named_parameters():
+            if "weight" in name:
+                # Find the local weights which should be pruned
+                # Average out the amplitudes over the whole fleet
+                amplitudes = p.data.detach().clone()
+                torch.distributed.all_reduce(
+                    amplitudes, op=torch.distributed.ReduceOp.SUM
+                )
+
+                # Prune the smallest ones first
+                isort = torch.argsort(amplitudes)
+                i_max = int(desired_pruning_ratio * amplitudes.numel())
+                p.data[isort[:i_max]] = 0.0
+
+    if rank == 0:
+        print(f"Model is now {desired_pruning_ratio:.2f} pruned")

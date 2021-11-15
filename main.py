@@ -11,9 +11,9 @@ def run(rank, size):
         rank,
         size,
         epochs=1,
-        batch_size=16,
+        batch_size=32,
         sync_interval=100,
-        strategy=Strategy.PRUNE,
+        strategy=Strategy.PRUNE_SORT,
         hysteresis=50,
     )
 

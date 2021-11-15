@@ -3,10 +3,20 @@ import torchvision
 import torchvision.transforms as transforms
 from enum import Enum, auto
 from spread import spread_lottery_tickets
-from prune import exchange_lottery_tickets, freeze_pruned_weights, rewind_model
+from prune import (
+    exchange_lottery_tickets,
+    freeze_pruned_weights,
+    rewind_model,
+    exchange_lottery_tickets_sorted,
+)
 import copy
+from collections import namedtuple
 
 _DATASET = torchvision.datasets.MNIST  # torchvision.datasets.CIFAR10
+
+TrainSettings = namedtuple(
+    "TrainSettings", ["LR", "pruning_eps", "pruning_max_ratio", "strategy"]
+)
 
 
 def test_model(rank: int, model: torch.nn.Module, batch_size: int) -> float:
@@ -41,7 +51,8 @@ def test_model(rank: int, model: torch.nn.Module, batch_size: int) -> float:
 
 
 class Strategy(Enum):
-    PRUNE = auto()
+    PRUNE_SORT = auto()
+    PRUNE_THRESHOLD = auto()
     SPREAD = auto()
 
 
@@ -58,8 +69,12 @@ def train_model(
     Train a model on a single rank
     """
 
-    # Initial setup to handle some distribution
     cpu_per_process = 2
+    eps = 1e-6
+    pruning_max_ratio = 0.3
+    pruning_ratio_growth = 0.05
+
+    # Initial setup to handle some distribution
     print(rank, f"Using {cpu_per_process} cpus per process")
     torch.set_num_threads(cpu_per_process)
 
@@ -95,9 +110,8 @@ def train_model(
     criterion = torch.nn.CrossEntropyLoss()
     optimizer = torch.optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
     keep_pruning = True
-    eps = 1e-5
-    pruning_max_ratio = 0.3
     model_snapshot = None
+    pruning_ratio = 0.0
 
     for epoch in range(epochs):
         running_loss = 0.0
@@ -114,7 +128,7 @@ def train_model(
             loss = criterion(outputs, labels)
             loss.backward()
 
-            if strategy == Strategy.PRUNE:
+            if strategy == Strategy.PRUNE_SORT or strategy == Strategy.PRUNE_THRESHOLD:
                 freeze_pruned_weights(model, epsilon=1e-4)
 
             optimizer.step()
@@ -133,13 +147,31 @@ def train_model(
                 if strategy == Strategy.SPREAD:
                     spread_lottery_tickets(rank, world_size, model, test_model)
 
-                elif strategy == Strategy.PRUNE and keep_pruning:
+                elif strategy == Strategy.PRUNE_THRESHOLD and keep_pruning:
                     pruning_ratio = exchange_lottery_tickets(
                         rank,
                         model,
                         epsilon=eps,
                         max_pruning_per_layer=0.5,
                         vote_threshold=2,
+                    )
+
+                    # Rewind the non-frozen weights to the snapshot
+                    rewind_model(
+                        model=model, model_snapshot=model_snapshot, epsilon=eps
+                    )
+
+                    if pruning_ratio > pruning_max_ratio:
+                        keep_pruning = False
+                        print(rank, "No more pruning")
+
+                elif strategy == Strategy.PRUNE_SORT and keep_pruning:
+                    pruning_ratio = pruning_ratio_growth + pruning_ratio
+
+                    exchange_lottery_tickets_sorted(
+                        rank,
+                        model,
+                        desired_pruning_ratio=pruning_ratio,
                     )
 
                     # Rewind the non-frozen weights to the snapshot
