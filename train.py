@@ -11,19 +11,16 @@ from prune import (
 )
 import copy
 from collections import namedtuple
+from model import Model, get_model
 
-_DATASET = torchvision.datasets.MNIST  # torchvision.datasets.CIFAR10
+_DATASET = torchvision.datasets.CIFAR10  # torchvision.datasets.CIFAR10
 
 TrainSettings = namedtuple(
     "TrainSettings", ["LR", "pruning_eps", "pruning_max_ratio", "strategy"]
 )
 
 
-def test_model(rank: int, model: torch.nn.Module, batch_size: int) -> float:
-    transform = transforms.Compose(
-        [transforms.ToTensor(), transforms.Normalize((0.5), (0.5))]
-    )
-
+def test_model(rank: int, model: torch.nn.Module, batch_size: int, transform) -> float:
     testset = _DATASET(
         root="./data", train=False, download=rank == 0, transform=transform
     )
@@ -36,10 +33,9 @@ def test_model(rank: int, model: torch.nn.Module, batch_size: int) -> float:
     with torch.no_grad():
         for data in testloader:
             images, labels = data
-            # calculate outputs by running images through the network
             outputs = model(images)
 
-            # the class with the highest energy is what we choose as prediction
+            # only check the top1
             _, predicted = torch.max(outputs.data, 1)
             total += labels.size(0)
             correct += (predicted == labels).sum().item()
@@ -53,6 +49,7 @@ def test_model(rank: int, model: torch.nn.Module, batch_size: int) -> float:
 class Strategy(Enum):
     PRUNE_SORT = auto()
     PRUNE_THRESHOLD = auto()
+    PRUNE_GROW = auto()
     SPREAD = auto()
 
 
@@ -80,7 +77,11 @@ def train_model(
 
     # Setup the transforms and the dataset
     transform = transforms.Compose(
-        [transforms.ToTensor(), transforms.Normalize((0.5), (0.5))]
+        [
+            transforms.transforms.Resize(32),
+            transforms.ToTensor(),
+            transforms.Normalize((0.5), (0.5)),
+        ]
     )
 
     trainset = _DATASET(
@@ -95,14 +96,8 @@ def train_model(
     torch.random.manual_seed(
         42
     )  # make sure that all the ranks have the same weights to begin with
-    model = torchvision.models.resnet18(
-        pretrained=False, progress=False, num_classes=len(trainset.targets)
-    )
+    model = get_model(Model.VGG11, num_classes=len(trainset.targets))
 
-    # Adjust the model for the MNIST dataset
-    model.conv1 = torch.nn.Conv2d(
-        1, 64, kernel_size=(7, 7), stride=(2, 2), padding=(3, 3), bias=False
-    )
     print(rank, "Model ready")
     torch.random.manual_seed(rank)
 
@@ -128,15 +123,20 @@ def train_model(
             loss = criterion(outputs, labels)
             loss.backward()
 
+            # Lottery-related handling of gradients
             if strategy == Strategy.PRUNE_SORT or strategy == Strategy.PRUNE_THRESHOLD:
                 freeze_pruned_weights(model, epsilon=1e-4)
+            elif strategy == Strategy.PRUNE_GROW:
+                # TODO: Rigging the lottery
+                pass
 
+            # Now we can go through a normal optimizer step
             optimizer.step()
 
             # print statistics
             running_loss += loss.item()
 
-            if i % 20 == 0:  # print every 200 mini-batches
+            if i % 20 == 0:
                 print(
                     rank,
                     "[%d, %5d] loss: %.3f" % (epoch + 1, i + 1, running_loss / 2000),
@@ -190,4 +190,4 @@ def train_model(
         print(rank, " Finished Training")
 
     # Test the model now
-    test_model(rank, model, batch_size)
+    test_model(rank, model, batch_size, transform)
