@@ -13,11 +13,15 @@ def run(rank, size):
         size,
         epochs=1,
         batch_size=32,
+        cpu_per_process=4,
+        model_name=Model.Resnet18,
+        warmup=40,
+        learning_rate=1e-2,
+        pruning_ratio_growth=0.025,
+        pruning_max_ratio=0.5,
         sync_interval=60,
         strategy=Strategy.PRUNE_SORT,
         hysteresis=50,
-        cpu_per_process=4,
-        model=Model.Resnet18,
     )
 
 

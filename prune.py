@@ -28,6 +28,7 @@ def rewind_model(
             if "weight" in name:
                 # Only rewind the weights which are not frozen
                 p.data = torch.where(p.data.abs() > epsilon, p_snap.data, p.data)
+                print(p)
 
             else:
                 # Completely rewind
@@ -43,7 +44,6 @@ def exchange_lottery_tickets(
 ):
     """
     Each agent prunes its weights, and exchanges the pruned coordinates with the others.
-
     """
 
     with torch.no_grad():
@@ -92,8 +92,9 @@ def exchange_lottery_tickets_sorted(
     desired_pruning_ratio: float,
 ):
     """
-    Each agent prunes its weights, and exchanges the pruned coordinates with the others.
+    Each agent prunes a fixed ratio of weights based on the shared amplitudes.
 
+    FIXME: We could prune individually instead and share the nulls
     """
     pruned_parameters = 0
     total_parameters = 0
@@ -101,9 +102,6 @@ def exchange_lottery_tickets_sorted(
     with torch.no_grad():
         for name, p in model.named_parameters():
             if "weight" in name:
-                # Find the local weights which should be pruned,
-                # average out the amplitudes over the whole fleet.
-
                 # We consider the absolute values on purpose, so that
                 # weights which have very different distributions across the fleet are not nuked
                 amplitudes = p.data.detach().clone().abs()

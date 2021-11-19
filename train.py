@@ -12,6 +12,7 @@ from prune import (
 import copy
 from collections import namedtuple
 from model import Model, get_model
+import math
 
 _DATASET = torchvision.datasets.CIFAR10  # torchvision.datasets.CIFAR10
 
@@ -58,20 +59,21 @@ def train_model(
     world_size: int,
     epochs: int,
     batch_size: int,
-    sync_interval: int,
     strategy: Strategy,
     hysteresis: int,
     cpu_per_process: int,
-    model: Model,
+    model_name: Model,
+    learning_rate: float,
+    warmup: int,
+    pruning_ratio_growth: float,
+    pruning_max_ratio: float,
+    sync_interval: int,
 ):
     """
     Train a model on a single rank
     """
 
-    cpu_per_process = 2
     eps = 1e-6
-    pruning_max_ratio = 0.3
-    pruning_ratio_growth = 0.05
 
     # Initial setup to handle some distribution
     torch.set_num_threads(cpu_per_process)
@@ -93,7 +95,7 @@ def train_model(
     print(rank, "Dataset ready")
 
     # Setup a model
-    model = get_model(model, num_classes=len(trainset.targets))
+    model = get_model(model_name, num_classes=len(trainset.targets))
 
     print(rank, "Model ready")
     torch.random.manual_seed(
@@ -102,7 +104,27 @@ def train_model(
 
     # Start the training
     criterion = torch.nn.CrossEntropyLoss()
-    optimizer = torch.optim.SGD(model.parameters(), lr=0.001, momentum=0.9)
+    optimizer = torch.optim.SGD(model.parameters(), lr=learning_rate, momentum=0.9)
+    max_steps = epochs * len(trainset) / batch_size
+    steps = 1
+
+    def update_lr(*_):
+        if steps < warmup:
+            # linear warmup
+            lr_mult = float(steps) / float(max(1, warmup))
+            lr_mult = max(lr_mult, 1e-2)  # could be that we've not seen any yet
+        else:
+            # cosine learning rate decay
+            progress = float(steps - warmup) / float(max(1, max_steps - warmup))
+            lr_mult = max(0.1, 0.5 * (1.0 + math.cos(math.pi * progress)))
+
+        return lr_mult
+
+    scheduler = torch.optim.lr_scheduler.LambdaLR(
+        optimizer,
+        lr_lambda=update_lr,
+    )
+
     keep_pruning = True
     model_snapshot = None
     pruning_ratio = 0.0
@@ -110,7 +132,7 @@ def train_model(
     for epoch in range(epochs):
         running_loss = 0.0
 
-        for i, data in enumerate(trainloader, 1):
+        for data in trainloader:
             # get the inputs; data is a list of [inputs, labels]
             inputs, labels = data
 
@@ -131,61 +153,66 @@ def train_model(
 
             # Now we can go through a normal optimizer step
             optimizer.step()
+            scheduler.step()
+            steps += 1
 
             # print statistics
             running_loss += loss.item()
 
-            if i % 20 == 0:
+            if steps % 20 == 0:
                 print(
                     rank,
-                    "[%d, %5d] loss: %.3f" % (epoch + 1, i + 1, running_loss / 2000),
+                    "[%d, %5d] loss: %.3f | LR: %.3f"
+                    % (
+                        epoch,
+                        steps,
+                        running_loss / 2000,
+                        scheduler.get_last_lr()[0],
+                    ),
                 )
                 running_loss = 0.0
 
-            if i % sync_interval == 0 and model_snapshot is not None:
-                if strategy == Strategy.SPREAD:
-                    spread_lottery_tickets(rank, world_size, model, test_model)
+            if steps > warmup:
+                if steps % sync_interval == 0 and model_snapshot is not None:
+                    if strategy == Strategy.SPREAD:
+                        spread_lottery_tickets(rank, world_size, model, test_model)
 
-                elif strategy == Strategy.PRUNE_THRESHOLD and keep_pruning:
-                    pruning_ratio = exchange_lottery_tickets(
-                        rank,
-                        model,
-                        epsilon=eps,
-                        max_pruning_per_layer=0.5,
-                        vote_threshold=2,
-                    )
+                    elif strategy == Strategy.PRUNE_THRESHOLD and keep_pruning:
+                        pruning_ratio = exchange_lottery_tickets(
+                            rank,
+                            model,
+                            epsilon=eps,
+                            max_pruning_per_layer=0.5,
+                            vote_threshold=2,
+                        )
 
-                    # Rewind the non-frozen weights to the snapshot
-                    rewind_model(
-                        model=model, model_snapshot=model_snapshot, epsilon=eps
-                    )
+                        # Rewind the non-frozen weights to the snapshot
+                        rewind_model(
+                            model=model, model_snapshot=model_snapshot, epsilon=eps
+                        )
 
-                    if pruning_ratio > pruning_max_ratio:
-                        keep_pruning = False
-                        print(rank, "No more pruning")
+                    elif strategy == Strategy.PRUNE_SORT and keep_pruning:
+                        pruning_ratio = pruning_ratio_growth + pruning_ratio
 
-                elif strategy == Strategy.PRUNE_SORT and keep_pruning:
-                    pruning_ratio = pruning_ratio_growth + pruning_ratio
+                        exchange_lottery_tickets_sorted(
+                            rank,
+                            model,
+                            desired_pruning_ratio=pruning_ratio,
+                        )
 
-                    exchange_lottery_tickets_sorted(
-                        rank,
-                        model,
-                        desired_pruning_ratio=pruning_ratio,
-                    )
+                        # Rewind the non-frozen weights to the snapshot
+                        rewind_model(
+                            model=model, model_snapshot=model_snapshot, epsilon=eps
+                        )
 
-                    # Rewind the non-frozen weights to the snapshot
-                    rewind_model(
-                        model=model, model_snapshot=model_snapshot, epsilon=eps
-                    )
+                if pruning_ratio > pruning_max_ratio:
+                    keep_pruning = False
+                    print(rank, "No more pruning")
 
-                    if pruning_ratio > pruning_max_ratio:
-                        keep_pruning = False
-                        print(rank, "No more pruning")
-
-            if i % hysteresis == 0:
-                with torch.no_grad():
-                    print(rank, "Saving model snapshot")
-                    model_snapshot = copy.deepcopy(model)
+                if steps % hysteresis == 0:
+                    with torch.no_grad():
+                        print(rank, "Saving model snapshot")
+                        model_snapshot = copy.deepcopy(model)
 
         print(rank, " Finished Training")
 
