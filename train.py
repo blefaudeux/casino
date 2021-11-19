@@ -61,6 +61,8 @@ def train_model(
     sync_interval: int,
     strategy: Strategy,
     hysteresis: int,
+    cpu_per_process: int,
+    model: Model,
 ):
     """
     Train a model on a single rank
@@ -72,13 +74,11 @@ def train_model(
     pruning_ratio_growth = 0.05
 
     # Initial setup to handle some distribution
-    print(rank, f"Using {cpu_per_process} cpus per process")
     torch.set_num_threads(cpu_per_process)
 
     # Setup the transforms and the dataset
     transform = transforms.Compose(
         [
-            transforms.transforms.Resize(32),
             transforms.ToTensor(),
             transforms.Normalize((0.5), (0.5)),
         ]
@@ -93,13 +93,12 @@ def train_model(
     print(rank, "Dataset ready")
 
     # Setup a model
-    torch.random.manual_seed(
-        42
-    )  # make sure that all the ranks have the same weights to begin with
-    model = get_model(Model.VGG11, num_classes=len(trainset.targets))
+    model = get_model(model, num_classes=len(trainset.targets))
 
     print(rank, "Model ready")
-    torch.random.manual_seed(rank)
+    torch.random.manual_seed(
+        rank
+    )  # Make sure that the processing differs in between ranks
 
     # Start the training
     criterion = torch.nn.CrossEntropyLoss()
@@ -185,6 +184,7 @@ def train_model(
 
             if i % hysteresis == 0:
                 with torch.no_grad():
+                    print(rank, "Saving model snapshot")
                     model_snapshot = copy.deepcopy(model)
 
         print(rank, " Finished Training")

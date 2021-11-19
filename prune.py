@@ -53,7 +53,7 @@ def exchange_lottery_tickets(
         for name, p in model.named_parameters():
             if "weight" in name:
                 # Find the local weights which should be pruned
-                local_prune = p.data < epsilon
+                local_prune = p.data.abs() < epsilon
 
                 # Share that with everyone. all_reduce requires ints
                 shared_prune = local_prune.to(torch.int32)
@@ -95,13 +95,18 @@ def exchange_lottery_tickets_sorted(
     Each agent prunes its weights, and exchanges the pruned coordinates with the others.
 
     """
+    pruned_parameters = 0
+    total_parameters = 0
 
     with torch.no_grad():
         for name, p in model.named_parameters():
             if "weight" in name:
-                # Find the local weights which should be pruned
-                # Average out the amplitudes over the whole fleet
-                amplitudes = p.data.detach().clone()
+                # Find the local weights which should be pruned,
+                # average out the amplitudes over the whole fleet.
+
+                # We consider the absolute values on purpose, so that
+                # weights which have very different distributions across the fleet are not nuked
+                amplitudes = p.data.detach().clone().abs()
                 torch.distributed.all_reduce(
                     amplitudes, op=torch.distributed.ReduceOp.SUM
                 )
@@ -109,7 +114,11 @@ def exchange_lottery_tickets_sorted(
                 # Prune the smallest ones first
                 isort = torch.argsort(amplitudes)
                 i_max = int(desired_pruning_ratio * amplitudes.numel())
+
+                pruned_parameters += i_max
+                total_parameters += amplitudes.numel()
+
                 p.data[isort[:i_max]] = 0.0
 
     if rank == 0:
-        print(f"Model is now {desired_pruning_ratio:.2f} pruned")
+        print(f"Model is now {pruned_parameters/total_parameters:.2f} pruned")

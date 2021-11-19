@@ -3,6 +3,7 @@ import os
 import torch.distributed as dist
 import torch.multiprocessing as mp
 from train import train_model, Strategy
+from model import Model
 
 
 def run(rank, size):
@@ -12,9 +13,11 @@ def run(rank, size):
         size,
         epochs=1,
         batch_size=32,
-        sync_interval=100,
+        sync_interval=60,
         strategy=Strategy.PRUNE_SORT,
         hysteresis=50,
+        cpu_per_process=4,
+        model=Model.Resnet18,
     )
 
 
