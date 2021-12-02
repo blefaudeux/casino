@@ -35,7 +35,27 @@ def rewind_model(
                 p.data = p_snap.data
 
 
-def exchange_lottery_tickets(
+def async_push_lottery_tickets(
+    client_store,
+    model: torch.nn.Module,
+    max_pruning_per_layer: float,
+):
+    # Use the distributed e thore to send async the lottery tickets
+    # store.set()
+    pass
+
+
+def async_get_lottery_tickets(
+    client_store,
+    model: torch.nn.Module,
+    max_pruning_per_layer: float,
+):
+    # Use the distributed e thore to send async the lottery tickets
+    # store.get()
+    pass
+
+
+def sync_exchange_lottery_tickets(
     rank: int,
     model: torch.nn.Module,
     epsilon: float,
@@ -86,7 +106,7 @@ def exchange_lottery_tickets(
     return pruning_ratio
 
 
-def exchange_lottery_tickets_sorted(
+def sync_exchange_lottery_tickets_sorted(
     rank: int,
     model: torch.nn.Module,
     desired_pruning_ratio: float,

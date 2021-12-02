@@ -4,15 +4,16 @@ import torchvision.transforms as transforms
 from enum import Enum, auto
 from spread import spread_lottery_tickets
 from prune import (
-    exchange_lottery_tickets,
+    sync_exchange_lottery_tickets,
     freeze_pruned_weights,
     rewind_model,
-    exchange_lottery_tickets_sorted,
+    sync_exchange_lottery_tickets_sorted,
 )
 import copy
 from collections import namedtuple
 from model import Model, get_model
 import math
+from store import get_client_store, get_server_store
 
 _DATASET = torchvision.datasets.CIFAR10  # torchvision.datasets.CIFAR10
 
@@ -77,6 +78,10 @@ def train_model(
 
     # Initial setup to handle some distribution
     torch.set_num_threads(cpu_per_process)
+    if rank == 0:
+        server_store = get_server_store()
+
+    client_store = get_client_store()
 
     # Setup the transforms and the dataset
     transform = transforms.Compose(
@@ -178,7 +183,7 @@ def train_model(
                         spread_lottery_tickets(rank, world_size, model, test_model)
 
                     elif strategy == Strategy.PRUNE_THRESHOLD and keep_pruning:
-                        pruning_ratio = exchange_lottery_tickets(
+                        pruning_ratio = sync_exchange_lottery_tickets(
                             rank,
                             model,
                             epsilon=eps,
@@ -194,7 +199,7 @@ def train_model(
                     elif strategy == Strategy.PRUNE_SORT and keep_pruning:
                         pruning_ratio = pruning_ratio_growth + pruning_ratio
 
-                        exchange_lottery_tickets_sorted(
+                        sync_exchange_lottery_tickets_sorted(
                             rank,
                             model,
                             desired_pruning_ratio=pruning_ratio,
